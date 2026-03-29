@@ -2,6 +2,7 @@ import kfp
 from kfp import dsl
 from kfp.dsl import *
 from typing import *
+from langchain_text_splitters import MarkdownHeaderTextSplitter
 
 @dsl.component(
     base_image="python:3.13-slim",
@@ -134,15 +135,21 @@ def chunk_and_embed(
             file_unique_id = f"{repo_name}:{file_data['path']}"
 
             # Create splitter
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                length_function=len,
-                separators=["\n\n", "\n", ". ", " ", ""]
+            headers_to_split_on = [
+                ("#", "Header 1"),
+                ("##", "Header 2"),
+                ("###", "Header 3"),
+            ]
+
+            text_splitter = MarkdownHeaderTextSplitter(
+                headers_to_split_on=headers_to_split_on
             )
 
             # Split into chunks
-            chunks = text_splitter.split_text(content)
+            if "#" in content:
+                chunks = text_splitter.split_text(content)
+            else:
+                chunks = content.split("\n\n")  
 
             print(f"File: {file_data['path']} -> {len(chunks)} chunks (avg: {sum(len(c) for c in chunks)/len(chunks):.0f} chars)")
 
