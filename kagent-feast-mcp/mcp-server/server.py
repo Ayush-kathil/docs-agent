@@ -1,4 +1,6 @@
 from fastmcp import FastMCP
+import logging
+import threading
 from pymilvus import MilvusClient
 from sentence_transformers import SentenceTransformer
 
@@ -10,17 +12,44 @@ EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"
 PORT = 8000
 
 mcp = FastMCP("Kubeflow Docs MCP Server")
+logger = logging.getLogger(__name__)
 
 model: SentenceTransformer = None
 client: MilvusClient = None
+_initialized = False
+_init_lock = threading.Lock()
 
 
 def _init():
-    global model, client
-    if model is None:
-        model = SentenceTransformer(EMBEDDING_MODEL)
-    if client is None:
-        client = MilvusClient(uri=MILVUS_URI, user=MILVUS_USER, password=MILVUS_PASSWORD)
+    """Initialize shared model/client exactly once.
+
+    Synchronization strategy:
+    - Fast path: return immediately after successful initialization.
+    - Slow path: take a process-local lock and re-check state (double-checked locking).
+
+    This guarantees that concurrent callers block until initialization completes,
+    and all callers observe the same initialized instances.
+    """
+    global model, client, _initialized
+
+    if _initialized:
+        return
+
+    with _init_lock:
+        if _initialized:
+            return
+
+        logger.info("Initializing shared MCP resources")
+
+        # Build local instances first, then publish atomically under the lock.
+        local_model = SentenceTransformer(EMBEDDING_MODEL)
+        local_client = MilvusClient(uri=MILVUS_URI, user=MILVUS_USER, password=MILVUS_PASSWORD)
+
+        model = local_model
+        client = local_client
+        _initialized = True
+
+        logger.info("Shared MCP resources initialized")
 
 
 @mcp.tool()
