@@ -10,6 +10,9 @@ from typing import Dict, Any, List, Optional, AsyncGenerator
 from sentence_transformers import SentenceTransformer
 from pymilvus import connections, Collection
 
+
+embedding_model = SentenceTransformer(EMBEDDING_MODEL)
+
 # Config
 KSERVE_URL = os.getenv("KSERVE_URL", "http://llama.docs-agent.svc.cluster.local/openai/v1/chat/completions")
 MODEL = os.getenv("MODEL", "llama3.1-8B")
@@ -113,6 +116,7 @@ class ChatRequest(BaseModel):
 
 def milvus_search(query: str, top_k: int = 5) -> Dict[str, Any]:
     """Execute a semantic search in Milvus and return structured JSON serializable results."""
+
     try:
         # Connect to Milvus
         connections.connect(alias="default", host=MILVUS_HOST, port=MILVUS_PORT)
@@ -120,8 +124,7 @@ def milvus_search(query: str, top_k: int = 5) -> Dict[str, Any]:
         collection.load()
 
         # Encoder (same model as pipeline)
-        encoder = SentenceTransformer(EMBEDDING_MODEL)
-        query_vec = encoder.encode(query).tolist()
+        query_vec = embedding_model.encode(query).tolist()
 
         search_params = {"metric_type": "COSINE", "params": {"nprobe": 32}}
         results = collection.search(
