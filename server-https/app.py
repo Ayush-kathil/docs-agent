@@ -11,7 +11,13 @@ from sentence_transformers import SentenceTransformer
 from pymilvus import connections, Collection
 
 
-embedding_model = SentenceTransformer(EMBEDDING_MODEL)
+embedding_model = None
+# Load embedding model once to avoid repeated initialization overhead
+def get_embedding_model():
+    global embedding_model
+    if embedding_model is None:
+        embedding_model = SentenceTransformer(EMBEDDING_MODEL)
+    return embedding_model
 
 # Config
 KSERVE_URL = os.getenv("KSERVE_URL", "http://llama.docs-agent.svc.cluster.local/openai/v1/chat/completions")
@@ -124,7 +130,8 @@ def milvus_search(query: str, top_k: int = 5) -> Dict[str, Any]:
         collection.load()
 
         # Encoder (same model as pipeline)
-        query_vec = embedding_model.encode(query).tolist()
+        model = get_embedding_model()
+        query_vec = model.encode(query).tolist()
 
         search_params = {"metric_type": "COSINE", "params": {"nprobe": 32}}
         results = collection.search(
@@ -197,9 +204,11 @@ async def execute_tool(tool_call: Dict[str, Any]) -> tuple[str, List[str]]:
         print(f"[ERROR] Tool execution failed: {e}")
         return f"Tool execution failed: {e}", []
 
-async def stream_llm_response(payload: Dict[str, Any]) -> AsyncGenerator[str, None]:
+async def stream_llm_response(payload: Dict[str, Any], citations_collector: Optional[List[str]] = None) -> AsyncGenerator[str, None]:
     """Stream response from LLM and handle tool calls, yielding SSE events"""
-    citations_collector = []
+    is_outermost = citations_collector is None
+    if citations_collector is None:
+        citations_collector = []
     
     try:
         async with httpx.AsyncClient(timeout=120) as client:
@@ -298,7 +307,7 @@ async def stream_llm_response(payload: Dict[str, Any]) -> AsyncGenerator[str, No
                         continue
         
         # Send citations if any were collected
-        if citations_collector:
+        if is_outermost and citations_collector:
             # Remove duplicates while preserving order
             unique_citations = []
             for citation in citations_collector:
@@ -308,7 +317,8 @@ async def stream_llm_response(payload: Dict[str, Any]) -> AsyncGenerator[str, No
             yield f"data: {json.dumps({'type': 'citations', 'citations': unique_citations})}\n\n"
         
         # Send completion signal
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        if is_outermost:
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
                         
     except Exception as e:
         print(f"[ERROR] Streaming failed: {e}")
@@ -344,7 +354,7 @@ async def handle_tool_follow_up(original_payload: Dict[str, Any], tool_call: Dic
         }
         
         # Stream the follow-up response
-        async for chunk in stream_llm_response(follow_up_payload):
+        async for chunk in stream_llm_response(follow_up_payload, citations_collector=citations_collector):
             yield chunk
         
     except Exception as e:
