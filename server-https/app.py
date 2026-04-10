@@ -9,15 +9,23 @@ import uvicorn
 from typing import Dict, Any, List, Optional, AsyncGenerator
 from sentence_transformers import SentenceTransformer
 from pymilvus import connections, Collection
+import threading
+import time
 
-
-embedding_model = None
-# Load embedding model once to avoid repeated initialization overhead
+_model_lock = threading.Lock()
+_embedding_model = None
 def get_embedding_model():
-    global embedding_model
-    if embedding_model is None:
-        embedding_model = SentenceTransformer(EMBEDDING_MODEL)
-    return embedding_model
+    """Thread-safe lazy initialization of SentenceTransformer"""
+    global _embedding_model
+    if _embedding_model is None:
+        with _model_lock:
+            # Double-checked locking
+            if _embedding_model is None:
+                start_t = time.perf_counter()
+                print(f"[INFO] Lazy loading SentenceTransformer model '{EMBEDDING_MODEL}'...")
+                _embedding_model = SentenceTransformer(EMBEDDING_MODEL)
+                print(f"[INFO] Model loaded in {time.perf_counter() - start_t:.3f} seconds.")
+    return _embedding_model
 
 # Config
 KSERVE_URL = os.getenv("KSERVE_URL", "http://llama.docs-agent.svc.cluster.local/openai/v1/chat/completions")
