@@ -1,16 +1,25 @@
 import os
 import json
 import httpx
+import logging
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
+import sys
+from pathlib import Path
 from typing import Dict, Any, List, Optional, AsyncGenerator
 from sentence_transformers import SentenceTransformer
 from pymilvus import connections, Collection
 import threading
 import time
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
+from shared.reranking import candidate_pool_limit, load_rerank_config_from_env, rerank_documents
 
 _model_lock = threading.Lock()
 _embedding_model = None
@@ -38,6 +47,9 @@ MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
 MILVUS_COLLECTION = os.getenv("MILVUS_COLLECTION", "docs_rag")
 MILVUS_VECTOR_FIELD = os.getenv("MILVUS_VECTOR_FIELD", "vector")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-mpnet-base-v2")
+
+logger = logging.getLogger(__name__)
+RERANK_CONFIG = load_rerank_config_from_env()
 
 # System prompt (same as WebSocket version)
 SYSTEM_PROMPT = """
@@ -141,12 +153,15 @@ def milvus_search(query: str, top_k: int = 5) -> Dict[str, Any]:
         model = get_embedding_model()
         query_vec = model.encode(query).tolist()
 
+        requested_top_k = max(1, int(top_k))
+        candidate_limit = candidate_pool_limit(requested_top_k, RERANK_CONFIG)
+
         search_params = {"metric_type": "COSINE", "params": {"nprobe": 32}}
         results = collection.search(
             data=[query_vec],
             anns_field=MILVUS_VECTOR_FIELD,
             param=search_params,
-            limit=int(top_k),
+            limit=candidate_limit,
             output_fields=["file_path", "content_text", "citation_url"],
         )
 
@@ -164,6 +179,16 @@ def milvus_search(query: str, top_k: int = 5) -> Dict[str, Any]:
                 "citation_url": entity.get("citation_url"),
                 "content_text": content_text,
             })
+
+        hits = rerank_documents(
+            query=query,
+            docs=hits,
+            config=RERANK_CONFIG,
+            top_k=requested_top_k,
+            logger=logger,
+            log_prefix="https_search",
+        )
+
         return {"results": hits}
     except Exception as e:
         print(f"[ERROR] Milvus search failed: {e}")
